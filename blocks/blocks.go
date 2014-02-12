@@ -11,9 +11,7 @@ type Msg struct {
 	route string
 }
 
-type Block struct {
-	Name string
-	Rule map[string]interface{}
+type BlockChans struct {
 	// inbound messages come through the InChan. Their route string governs how
 	// they will be processed by the block
 	InChan chan Msg
@@ -30,43 +28,62 @@ type Block struct {
 	ExitChan chan bool
 }
 
+type Block struct {
+	Name  string // the name of the block specifed by the user (like MyBlock)
+	Kind  string // the kind of block this is (like count, toFile, fromSQS)
+	Rule  map[string]interface{}
+	Chans BlockChans
+}
+
 // A Block must satisfy, at the very minium, this interface. All blocks that
 // inherit from Block satisfies these by default, though any of them can be
 // overriden.
 type BlockInterface interface {
-	GetName() string
-	GetChans() (chan Msg, chan Msg, chan error, chan bool, chan bool)
-	GetRule(chan map[string]interface{}) error
-	SetRule(MsgData) error
-	Setup() error
+	getName() string
+	getKind() string
+	getChans() BlockChans
+	getRule(chan map[string]interface{}) error
+	setRule(MsgData) error
+	setup() error
+	tidyUp() error
 }
 
 // returns the name of the block
-func (b *Block) GetName() string {
+func (b *Block) getName() string {
 	return b.Name
 }
 
+// returns the kind of the block
+func (b *Block) getKind() string {
+	return b.Kind
+}
+
 // returns the block's component channels
-func (b *Block) GetChans() (chan Msg, chan Msg, chan error, chan bool, chan bool) {
-	return b.InChan, b.OutChan, b.ErrChan, b.QuitChan, b.ExitChan
+func (b *Block) getChans() BlockChans {
+	return b.Chans
 }
 
 // Setup is called before the block starts listening for messages of any kind
-func (b *Block) Setup() error {
+func (b *Block) setup() error {
 	log.Println("setting up default rule")
 	b.Rule = map[string]interface{}{}
 	return nil
 }
 
+// TidyUp is to close anything that needs closing before the block quits
+func (b *Block) tidyUp() error {
+	return nil
+}
+
 // GetRule returns the block's rule
-func (b *Block) GetRule(respChan chan map[string]interface{}) error {
+func (b *Block) getRule(respChan chan map[string]interface{}) error {
 	log.Println("getting rule")
 	respChan <- b.Rule
 	return nil
 }
 
 // SetRule specifies the block's rule
-func (b *Block) SetRule(msg MsgData) error {
+func (b *Block) setRule(msg MsgData) error {
 	log.Println("setting rule")
 	for key := range msg {
 		log.Println(key)
@@ -107,7 +124,7 @@ type State interface {
 }
 
 type Generator interface {
-	EmitMessage() (MsgData, error)
+	EmitMessages(chan MsgData)
 }
 
 type Source interface {
@@ -115,36 +132,44 @@ type Source interface {
 }
 
 type RuleBound interface {
-	SetRule(MsgData) error
-	GetRule(chan map[string]interface{}) error
+	setRule(MsgData) error
+	getRule(chan map[string]interface{}) error
 }
 
 // the main block routine
 
 func BlockRoutine(b BlockInterface) {
 
-	inChan, outChan, errChan, quitChan, exitChan := b.GetChans()
+	c := b.getChans()
 
-	b.Setup()
+	b.setup()
 
 	// see what the block can do
 	transformer, doesTransform := interface{}(b).(Transform)
 	sinker, doesSink := interface{}(b).(Sink)
 	ruler, doesRule := interface{}(b).(RuleBound)
+	generator, doesGenerate := interface{}(b).(Generator)
+
+	genChan := make(chan MsgData)
+	if doesGenerate {
+		go func() {
+			generator.EmitMessages(genChan)
+		}()
+	}
 
 	for {
 		select {
-		case msg := <-inChan:
-			log.Println(msg.route)
+		case msg := <-c.InChan:
+			log.Println("inbound route:", msg.route)
 			switch msg.route {
 			case "in":
 				if doesTransform {
 					outMsg, err := transformer.TransformMessage(msg.msg)
 					if err != nil {
-						errChan <- err
+						c.ErrChan <- err
 					}
 					if outMsg != nil {
-						outChan <- Msg{
+						c.OutChan <- Msg{
 							msg:   outMsg,
 							route: "in",
 						}
@@ -153,19 +178,27 @@ func BlockRoutine(b BlockInterface) {
 				if doesSink {
 					err := sinker.WriteExternalMessage(msg.msg)
 					if err != nil {
-						errChan <- err
+						c.ErrChan <- err
 					}
 				}
 			case "setrule":
 				if doesRule {
-					ruler.SetRule(msg.msg)
+					ruler.setRule(msg.msg)
 				}
+			case "":
+				// connections inbound
+
 			}
-		case <-quitChan:
-			log.Println("quitting")
-			exitChan <- true
+		case msg := <-genChan:
+			c.OutChan <- Msg{
+				msg: msg,
+			}
+		case <-c.QuitChan:
+			log.Println("tidying")
+			b.tidyUp()
+			log.Println("quitting", b.getKind(), b.getName())
+			c.ExitChan <- true
 			return
 		}
-
 	}
 }
