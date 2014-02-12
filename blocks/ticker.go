@@ -1,50 +1,53 @@
 package blocks
 
 import (
+	"errors"
 	"time"
 )
 
 // emits the time. Specify the period - the time between emissions - in seconds
 // as a rule.
-func Ticker(b *Block) {
+type Ticker struct {
+	Block
+	ticker <-chan time.Time
+	Kind   string "ticker"
+}
 
-	type tickerRule struct {
-		Interval string
+func (b *Ticker) setup() error {
+	b.Rule = map[string]interface{}{
+		"Interval": "1s",
 	}
+	b.ticker = time.Tick(time.Duration(1) * time.Second)
+	return nil
+}
 
-	rule := &tickerRule{
-		Interval: "1s",
-	}
-
-	tickC := time.Tick(time.Duration(1) * time.Second)
+func (b *Ticker) EmitMessages(outchan chan MsgData) {
 
 	for {
 		select {
-		case tick := <-tickC:
-			msg := make(map[string]interface{})
-			Set(msg, "t", tick)
-			out := BMsg{
-				Msg:          msg,
-				ResponseChan: nil,
+		case tick := <-b.ticker:
+			out := map[string]interface{}{
+				"time": tick,
 			}
-			broadcast(b.OutChans, &out)
-		case msg := <-b.AddChan:
-			updateOutChans(msg, b)
-
-		case r := <-b.Routes["set_rule"]:
-			unmarshal(r, rule)
-			newDur, err := time.ParseDuration(rule.Interval)
-			if err != nil {
-				break
-			}
-			tickC = time.Tick(newDur)
-
-		case r := <-b.Routes["get_rule"]:
-			marshal(r, rule)
-
-		case <-b.QuitChan:
-			quit(b)
-			return
+			outchan <- out
 		}
 	}
+}
+
+func (b *Ticker) setRule(msg MsgData) error {
+	intervalInterface, ok := msg["Interval"]
+	if !ok {
+		return errors.New("Rule message did not contain Interval")
+	}
+	interval, ok := intervalInterface.(string)
+	if !ok {
+		return errors.New("Interval could not be type asserted to string")
+	}
+	newDur, err := time.ParseDuration(interval)
+	if err != nil {
+		return err
+	}
+	b.ticker = time.Tick(newDur)
+	return nil
+
 }
