@@ -1,13 +1,12 @@
 package library
 
 import (
-	"errors"
+	"log"
 	"time"
 
-	"github.com/garyburd/redigo/redis"
-	"github.com/nytlabs/gojee"                 // jee
+	"github.com/fzzy/radix/redis"
 	"github.com/nytlabs/streamtools/st/blocks" // blocks
-	"github.com/nytlabs/streamtools/st/util"   // util
+	"github.com/nytlabs/streamtools/st/util"
 )
 
 // specify those channels we're going to use to communicate with streamtools
@@ -28,7 +27,7 @@ func NewRedis() blocks.BlockInterface {
 // Setup is called once before running the block. We build up the channels and specify what kind of block this is.
 func (b *Redis) Setup() {
 	b.Kind = "Redis"
-	b.Desc = "executes redis commands with arbitrary number of arguments"
+	b.Desc = "sends arbitrary commands to redis"
 	b.in = b.InRoute("in")
 	b.inrule = b.InRoute("rule")
 	b.queryrule = b.QueryRoute("rule")
@@ -36,78 +35,88 @@ func (b *Redis) Setup() {
 	b.out = b.Broadcast()
 }
 
-func newPool(server, password string) *redis.Pool {
-	return &redis.Pool{
-		MaxIdle:     3,
-		IdleTimeout: 240 * time.Second,
-		Dial: func() (redis.Conn, error) {
-			c, err := redis.Dial("tcp", server)
-			if err != nil {
-				return nil, err
-			}
-			if _, err := c.Do("AUTH", password); err != nil {
-				c.Close()
-				return nil, err
-			}
-			return c, err
-		},
-		TestOnBorrow: func(c redis.Conn, t time.Time) error {
-			_, err := c.Do("PING")
-			return err
-		},
-	}
-}
-
 // Run is the block's main loop. Here we listen on the different channels we set up.
 func (b *Redis) Run() {
+	var server string
 	var command string
-	var args []string
 
 	for {
 		select {
 		case ruleI := <-b.inrule:
-			// set a parameter of the block
-			command, err = util.ParseString(ruleI, "Command")
-			if err != nil {
-				b.Error(err)
-				break
-			}
-			args, err = util.ParseArrayString(ruleI, "Arguments")
-			if err != nil {
-				b.Error(err)
-				break
+			server, _ = util.ParseString(ruleI, "Server")
+			command, _ = util.ParseString(ruleI, "Command")
+
+		case responseChan := <-b.queryrule:
+			// deal with a query request
+			responseChan <- map[string]interface{}{
+				"Server":  server,
+				"Command": command,
 			}
 		case <-b.quit:
 			// quit the block
 			return
-			// deal with inbound data
 		case msg := <-b.in:
-			if tree == nil {
-				continue
-			}
-			v, err := jee.Eval(tree, msg)
+			log.Println(msg)
+			client, err := redis.DialTimeout("tcp", server, time.Duration(10)*time.Second)
 			if err != nil {
 				b.Error(err)
-				break
+				continue
 			}
+			defer client.Close()
 
-			if _, ok := v.(string); !ok {
-				b.Error(errors.New("can only redis sets of strings"))
+			reply := client.Cmd(command)
+			if reply.Err != nil {
+				b.Error(reply.Err)
 				continue
 			}
 
-			_, ok := set[v]
-			// emit the incoming message if it isn't found in the set
-			if !ok {
-				b.out <- msg
-				set[v] = true // and add it to the set
-			}
-		case c := <-b.queryrule:
-			// deal with a query request
-			c <- map[string]interface{}{
-				"Path": path,
-			}
+			if reply.Type == redis.ErrorReply {
+				b.Error(reply.Err)
+				continue
 
+			} else if reply.Type == redis.IntegerReply {
+				parsedVar, err := reply.Int()
+				if err != nil {
+					b.Error(err)
+					continue
+				}
+				out := map[string]interface{}{
+					"data": parsedVar,
+				}
+				b.out <- out
+			} else if reply.Type == redis.MultiReply {
+				if len(reply.Elems)%2 != 0 {
+					parsedVar, err := reply.List()
+					if err != nil {
+						b.Error(err)
+						continue
+					}
+					out := map[string]interface{}{
+						"data": parsedVar,
+					}
+					b.out <- out
+				} else {
+					parsedVar, err := reply.Hash()
+					if err != nil {
+						b.Error(err)
+						continue
+					}
+					out := map[string]interface{}{
+						"data": parsedVar,
+					}
+					b.out <- out
+				}
+			} else if reply.Type != redis.MultiReply {
+				parsedVar, err := reply.Str()
+				if err != nil {
+					b.Error(err)
+					continue
+				}
+				out := map[string]interface{}{
+					"data": parsedVar,
+				}
+				b.out <- out
+			}
 		}
 	}
 }
