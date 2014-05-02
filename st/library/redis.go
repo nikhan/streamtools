@@ -1,6 +1,7 @@
 package library
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/garyburd/redigo/redis"
@@ -46,6 +47,32 @@ func newPool(server, password string) *redis.Pool {
 			return err
 		},
 	}
+}
+
+func formatReply(reply interface{}) (interface{}, error) {
+	switch reply := reply.(type) {
+	case int64:
+		x := int(reply)
+		return x, nil
+	case string:
+		return reply, nil
+	case []byte:
+		return string(reply), nil
+	case []interface{}:
+		result := make([]string, len(reply))
+		for i := range reply {
+			if reply[i] == nil {
+				continue
+			}
+			p, ok := reply[i].([]byte)
+			if !ok {
+				return nil, fmt.Errorf("redigo: unexpected element type for Strings, got type %T", reply[i])
+			}
+			result[i] = string(p)
+		}
+		return result, nil
+	}
+	return nil, fmt.Errorf("redigo: unexpected type for Values, got type %T", reply)
 }
 
 // Setup is called once before running the block. We build up the channels and specify what kind of block this is.
@@ -124,8 +151,8 @@ func (b *Redis) Run() {
 			// quit the block
 			return
 		case msg := <-b.in:
+
 			conn := pool.Get()
-			defer conn.Close()
 
 			args := make([]interface{}, len(argumentTrees))
 			for i, tree := range argumentTrees {
@@ -138,14 +165,16 @@ func (b *Redis) Run() {
 			}
 
 			// commands like 'KEYS *' or 'SET NUMBERS 1'
-			n, err := redis.Strings(conn.Do(command, args...))
+			reply, err := conn.Do(command, args...)
 			if err != nil {
 				b.Error(err)
 				break
 			}
+			conn.Close()
 
+			nicerReply, err := formatReply(reply)
 			out := map[string]interface{}{
-				"response": n,
+				"response": nicerReply,
 			}
 			b.out <- out
 		}
