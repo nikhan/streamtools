@@ -1,11 +1,9 @@
 package library
 
 import (
-	"errors"
-	"log"
 	"time"
 
-	"github.com/fzzy/radix/redis"
+	"github.com/garyburd/redigo/redis"
 	"github.com/nytlabs/gojee"
 	"github.com/nytlabs/streamtools/st/blocks" // blocks
 	"github.com/nytlabs/streamtools/st/util"
@@ -26,6 +24,30 @@ func NewRedis() blocks.BlockInterface {
 	return &Redis{}
 }
 
+func newPool(server, password string) *redis.Pool {
+	return &redis.Pool{
+		MaxIdle:     3,
+		IdleTimeout: 240 * time.Second,
+		Dial: func() (redis.Conn, error) {
+			c, err := redis.Dial("tcp", server)
+			if err != nil {
+				return nil, err
+			}
+			if password != "" {
+				if _, err := c.Do("AUTH", password); err != nil {
+					c.Close()
+					return nil, err
+				}
+			}
+			return c, err
+		},
+		TestOnBorrow: func(c redis.Conn, t time.Time) error {
+			_, err := c.Do("PING")
+			return err
+		},
+	}
+}
+
 // Setup is called once before running the block. We build up the channels and specify what kind of block this is.
 func (b *Redis) Setup() {
 	b.Kind = "Redis"
@@ -40,11 +62,12 @@ func (b *Redis) Setup() {
 // Run is the block's main loop. Here we listen on the different channels we set up.
 func (b *Redis) Run() {
 	var server string
-	var iHateThis string
+	var password string
 	var command string
 	var arguments []string
 	var argumentTrees []*jee.TokenTree
 	var err error
+	var pool *redis.Pool
 
 	for {
 		select {
@@ -54,7 +77,11 @@ func (b *Redis) Run() {
 				b.Error(err)
 				continue
 			}
-			iHateThis = server
+			password, err = util.ParseString(ruleI, "Password")
+			if err != nil {
+				b.Error(err)
+				continue
+			}
 			command, err = util.ParseString(ruleI, "Command")
 			if err != nil {
 				b.Error(err)
@@ -83,12 +110,13 @@ func (b *Redis) Run() {
 					argumentTrees[i] = tree
 				}
 			}
+			pool = newPool(server, password)
 
 		case responseChan := <-b.queryrule:
-			log.Println(iHateThis)
 			// deal with a query request
 			responseChan <- map[string]interface{}{
 				"Server":    server,
+				"Password":  password,
 				"Command":   command,
 				"Arguments": arguments,
 			}
@@ -96,92 +124,30 @@ func (b *Redis) Run() {
 			// quit the block
 			return
 		case msg := <-b.in:
-			log.Println("server:", server)
-			log.Println("iHateThis:", iHateThis)
-			client, err := redis.DialTimeout("tcp", iHateThis, time.Duration(10)*time.Second)
+			conn := pool.Get()
+			defer conn.Close()
+
+			args := make([]interface{}, len(argumentTrees))
+			for i, tree := range argumentTrees {
+				argument, err := jee.Eval(tree, msg)
+				if err != nil {
+					b.Error(err)
+					break
+				}
+				args[i] = argument
+			}
+
+			// commands like 'KEYS *' or 'SET NUMBERS 1'
+			n, err := redis.Strings(conn.Do(command, args...))
 			if err != nil {
 				b.Error(err)
-				continue
-			}
-			defer client.Close()
-
-			var reply *redis.Reply
-
-			if argumentTrees != nil {
-				x := make([]string, len(argumentTrees))
-				for i, tree := range argumentTrees {
-					argument, err := jee.Eval(tree, msg)
-					if err != nil {
-						b.Error(err)
-						break
-					}
-					argS, ok := argument.(string)
-					if !ok {
-						b.Error(errors.New("arguments must be strings"))
-						break
-					}
-					x[i] = argS
-				}
-
-				// commands like 'KEYS *' or 'SET NUMBERS 1'
-				reply = client.Cmd(command, x)
-			} else {
-				// argument-less commands like DBSIZE
-				reply = client.Cmd(command)
+				break
 			}
 
-			if reply.Err != nil {
-				b.Error(reply.Err)
-				continue
+			out := map[string]interface{}{
+				"response": n,
 			}
-
-			if reply.Type == redis.ErrorReply {
-				b.Error(reply.Err)
-				continue
-
-			} else if reply.Type == redis.IntegerReply {
-				parsedVar, err := reply.Int()
-				if err != nil {
-					b.Error(err)
-					continue
-				}
-				out := map[string]interface{}{
-					"data": parsedVar,
-				}
-				b.out <- out
-			} else if reply.Type == redis.MultiReply {
-				if len(reply.Elems)%2 != 0 {
-					parsedVar, err := reply.List()
-					if err != nil {
-						b.Error(err)
-						continue
-					}
-					out := map[string]interface{}{
-						"data": parsedVar,
-					}
-					b.out <- out
-				} else {
-					parsedVar, err := reply.Hash()
-					if err != nil {
-						b.Error(err)
-						continue
-					}
-					out := map[string]interface{}{
-						"data": parsedVar,
-					}
-					b.out <- out
-				}
-			} else if reply.Type != redis.MultiReply {
-				parsedVar, err := reply.Str()
-				if err != nil {
-					b.Error(err)
-					continue
-				}
-				out := map[string]interface{}{
-					"data": parsedVar,
-				}
-				b.out <- out
-			}
+			b.out <- out
 		}
 	}
 }
