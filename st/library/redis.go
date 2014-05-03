@@ -1,6 +1,7 @@
 package library
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/garyburd/redigo/redis"
@@ -46,6 +47,35 @@ func newPool(server, password string) *redis.Pool {
 			return err
 		},
 	}
+}
+
+func formatReply(reply interface{}) (interface{}, error) {
+	switch reply := reply.(type) {
+	case []interface{}:
+		result := make([]string, len(reply))
+		for i := range reply {
+			if reply[i] == nil {
+				continue
+			}
+			p, ok := reply[i].([]byte)
+			if !ok {
+				return nil, fmt.Errorf("unexpected element type for string, got type %T", reply[i])
+			}
+			result[i] = string(p)
+		}
+		return result, nil
+	case string:
+		return reply, nil
+	case int:
+		result := int(reply)
+		return result, nil
+	case int64:
+		result := int(reply)
+		return result, nil
+	case []byte:
+		return string(reply), nil
+	}
+	return nil, fmt.Errorf("some other error happened")
 }
 
 // Setup is called once before running the block. We build up the channels and specify what kind of block this is.
@@ -138,14 +168,20 @@ func (b *Redis) Run() {
 			}
 
 			// commands like 'KEYS *' or 'SET NUMBERS 1'
-			n, err := redis.Strings(conn.Do(command, args...))
+			n, err := conn.Do(command, args...)
+			if err != nil {
+				b.Error(err)
+				break
+			}
+
+			formatted, err := formatReply(n)
 			if err != nil {
 				b.Error(err)
 				break
 			}
 
 			out := map[string]interface{}{
-				"response": n,
+				"response": formatted,
 			}
 			b.out <- out
 		}
