@@ -93,10 +93,10 @@ func (b *Redis) Setup() {
 
 // Run is the block's main loop. Here we listen on the different channels we set up.
 func (b *Redis) Run() {
-	var server string
+	var server = "localhost:6379"
 	var password string
 	var command string
-	var arguments []string
+	var arguments = make([]string, 0, 10)
 	var argumentTrees []*jee.TokenTree
 	var err error
 	var pool *redis.Pool
@@ -120,10 +120,12 @@ func (b *Redis) Run() {
 				continue
 			}
 
-			arguments, err = util.ParseArrayString(ruleI, "Arguments")
-			if err != nil {
-				b.Error(err)
-				continue
+			if util.KeyExists(ruleI, "Arguments") {
+				arguments, err = util.ParseArrayString(ruleI, "Arguments")
+				if err != nil {
+					b.Error(err)
+					continue
+				}
 			}
 
 			if len(arguments) > 0 {
