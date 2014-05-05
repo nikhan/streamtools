@@ -51,10 +51,15 @@ func newPool(server, password string) *redis.Pool {
 
 func formatReply(reply interface{}) (interface{}, error) {
 	switch reply := reply.(type) {
+	case int:
+		result := int(reply)
+		return result, nil
 	case int64:
-		x := int(reply)
-		return x, nil
+		result := int(reply)
+		return result, nil
 	case string:
+		return reply, nil
+	case []string:
 		return reply, nil
 	case []byte:
 		return string(reply), nil
@@ -66,13 +71,13 @@ func formatReply(reply interface{}) (interface{}, error) {
 			}
 			p, ok := reply[i].([]byte)
 			if !ok {
-				return nil, fmt.Errorf("redigo: unexpected element type for Strings, got type %T", reply[i])
+				return nil, fmt.Errorf("unexpected element type for string, got type %T", reply[i])
 			}
 			result[i] = string(p)
 		}
 		return result, nil
 	}
-	return nil, fmt.Errorf("redigo: unexpected type for Values, got type %T", reply)
+	return nil, fmt.Errorf("some other error happened")
 }
 
 // Setup is called once before running the block. We build up the channels and specify what kind of block this is.
@@ -170,6 +175,7 @@ func (b *Redis) Run() {
 				b.Error(err)
 				break
 			}
+
 			conn.Close()
 
 			nicerReply, err := formatReply(reply)
