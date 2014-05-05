@@ -51,16 +51,8 @@ func newPool(server, password string) *redis.Pool {
 
 func formatReply(reply interface{}) (interface{}, error) {
 	switch reply := reply.(type) {
-	case int:
-		result := int(reply)
-		return result, nil
 	case int64:
-		result := int(reply)
-		return result, nil
-	case string:
-		return reply, nil
-	case []string:
-		return reply, nil
+		return float64(reply), nil
 	case []byte:
 		return string(reply), nil
 	case []interface{}:
@@ -69,11 +61,11 @@ func formatReply(reply interface{}) (interface{}, error) {
 			if reply[i] == nil {
 				continue
 			}
-			p, ok := reply[i].([]byte)
-			if !ok {
-				return nil, fmt.Errorf("unexpected element type for string, got type %T", reply[i])
+			p, err := formatReply(reply[i])
+			if err != nil {
+				return nil, fmt.Errorf("unexpected element type. Got type %T", reply[i])
 			}
-			result[i] = interface{}(string(p))
+			result[i] = p
 		}
 		return result, nil
 	}
@@ -164,7 +156,7 @@ func (b *Redis) Run() {
 			}
 
 			conn := pool.Get()
-			
+
 			args := make([]interface{}, len(argumentTrees))
 			for i, tree := range argumentTrees {
 				argument, err := jee.Eval(tree, msg)
