@@ -2,6 +2,7 @@ package util
 
 import (
 	"errors"
+
 	"github.com/nytlabs/gojee"
 )
 
@@ -79,6 +80,12 @@ func ParseInt(ruleI interface{}, key string) (int, error) {
 	}
 	val = int(floatval)
 	return val, nil
+}
+
+func KeyExists(ruleI interface{}, key string) bool {
+	rule := ruleI.(map[string]interface{})
+	_, ok := rule[key]
+	return ok
 }
 
 func ParseArrayString(ruleI interface{}, key string) ([]string, error) {

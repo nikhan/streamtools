@@ -51,6 +51,18 @@ func newPool(server, password string) *redis.Pool {
 
 func formatReply(reply interface{}) (interface{}, error) {
 	switch reply := reply.(type) {
+	case int:
+		result := int(reply)
+		return result, nil
+	case int64:
+		result := int(reply)
+		return result, nil
+	case string:
+		return reply, nil
+	case []string:
+		return reply, nil
+	case []byte:
+		return string(reply), nil
 	case []interface{}:
 		result := make([]interface{}, len(reply))
 		for i := range reply {
@@ -64,16 +76,6 @@ func formatReply(reply interface{}) (interface{}, error) {
 			result[i] = interface{}(string(p))
 		}
 		return result, nil
-	case string:
-		return reply, nil
-	case int:
-		result := int(reply)
-		return result, nil
-	case int64:
-		result := int(reply)
-		return result, nil
-	case []byte:
-		return string(reply), nil
 	}
 	return nil, fmt.Errorf("some other error happened")
 }
@@ -91,10 +93,10 @@ func (b *Redis) Setup() {
 
 // Run is the block's main loop. Here we listen on the different channels we set up.
 func (b *Redis) Run() {
-	var server string
+	var server = "localhost:6379"
 	var password string
 	var command string
-	var arguments []string
+	var arguments = make([]string, 0, 10)
 	var argumentTrees []*jee.TokenTree
 	var err error
 	var pool *redis.Pool
@@ -118,10 +120,12 @@ func (b *Redis) Run() {
 				continue
 			}
 
-			arguments, err = util.ParseArrayString(ruleI, "Arguments")
-			if err != nil {
-				b.Error(err)
-				continue
+			if util.KeyExists(ruleI, "Arguments") {
+				arguments, err = util.ParseArrayString(ruleI, "Arguments")
+				if err != nil {
+					b.Error(err)
+					continue
+				}
 			}
 
 			if len(arguments) > 0 {
@@ -172,21 +176,17 @@ func (b *Redis) Run() {
 			}
 
 			// commands like 'KEYS *' or 'SET NUMBERS 1'
-			n, err := conn.Do(command, args...)
+			reply, err := conn.Do(command, args...)
+			if err != nil {
+				b.Error(err)
+				break
+			}
+
 			conn.Close()
-			if err != nil {
-				b.Error(err)
-				break
-			}
 
-			formatted, err := formatReply(n)
-			if err != nil {
-				b.Error(err)
-				break
-			}
-
+			nicerReply, err := formatReply(reply)
 			out := map[string]interface{}{
-				"response": formatted,
+				"response": nicerReply,
 			}
 			b.out <- out
 		}
