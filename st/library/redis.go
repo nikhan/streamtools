@@ -52,7 +52,7 @@ func newPool(server, password string) *redis.Pool {
 func formatReply(reply interface{}) (interface{}, error) {
 	switch reply := reply.(type) {
 	case []interface{}:
-		result := make([]string, len(reply))
+		result := make([]interface{}, len(reply))
 		for i := range reply {
 			if reply[i] == nil {
 				continue
@@ -61,7 +61,7 @@ func formatReply(reply interface{}) (interface{}, error) {
 			if !ok {
 				return nil, fmt.Errorf("unexpected element type for string, got type %T", reply[i])
 			}
-			result[i] = string(p)
+			result[i] = interface{}(string(p))
 		}
 		return result, nil
 	case string:
@@ -154,9 +154,13 @@ func (b *Redis) Run() {
 			// quit the block
 			return
 		case msg := <-b.in:
-			conn := pool.Get()
-			defer conn.Close()
+			if pool == nil {
+				b.Error("not connected to redis")
+				break
+			}
 
+			conn := pool.Get()
+			
 			args := make([]interface{}, len(argumentTrees))
 			for i, tree := range argumentTrees {
 				argument, err := jee.Eval(tree, msg)
@@ -169,6 +173,7 @@ func (b *Redis) Run() {
 
 			// commands like 'KEYS *' or 'SET NUMBERS 1'
 			n, err := conn.Do(command, args...)
+			conn.Close()
 			if err != nil {
 				b.Error(err)
 				break
